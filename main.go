@@ -25,12 +25,9 @@ var limiter = rate.NewLimiter(5, 10)
 func main() {
 	e := echo.New()
 
-	// CORS
+	// 🔥 Middleware primero
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{
-			"http://localhost:5173",
-			"https://tu-frontend.vercel.app",
-		},
+		AllowOrigins: []string{"*"}, // en producción puedes restringir
 		AllowMethods: []string{echo.POST, echo.OPTIONS},
 		AllowHeaders: []string{echo.HeaderContentType},
 		ExposeHeaders: []string{
@@ -40,12 +37,9 @@ func main() {
 		},
 	}))
 
-	e.GET("/", func(c echo.Context) error {
-		return c.String(http.StatusOK, "API running")
-	})
-
 	e.POST("/compress", compressHandler)
 
+	// 🔥 Puerto dinámico requerido por Fly
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
