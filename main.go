@@ -25,16 +25,12 @@ var limiter = rate.NewLimiter(5, 10)
 func main() {
 	e := echo.New()
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	e.Start(":" + port)
-
-	// 🔥 CORS middleware
+	// CORS
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:5173"},
+		AllowOrigins: []string{
+			"http://localhost:5173",
+			"https://tu-frontend.vercel.app",
+		},
 		AllowMethods: []string{echo.POST, echo.OPTIONS},
 		AllowHeaders: []string{echo.HeaderContentType},
 		ExposeHeaders: []string{
@@ -44,9 +40,18 @@ func main() {
 		},
 	}))
 
+	e.GET("/", func(c echo.Context) error {
+		return c.String(http.StatusOK, "API running")
+	})
+
 	e.POST("/compress", compressHandler)
 
-	e.Start(":8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	e.Logger.Fatal(e.Start(":" + port))
 }
 
 func compressHandler(c echo.Context) error {
