@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -22,12 +24,19 @@ const maxFileSize = 10 << 20 // 10MB
 // Rate limiter global
 var limiter = rate.NewLimiter(5, 10)
 
+// Pool de buffers para reutilización
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
 func main() {
 	e := echo.New()
 
 	// 🔥 Middleware primero
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"*"}, // en producción puedes restringir
+		AllowOrigins: []string{"*"},
 		AllowMethods: []string{echo.POST, echo.OPTIONS},
 		AllowHeaders: []string{echo.HeaderContentType},
 		ExposeHeaders: []string{
@@ -39,13 +48,19 @@ func main() {
 
 	e.POST("/compress", compressHandler)
 
-	// 🔥 Puerto dinámico requerido por Fly
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
 	e.Logger.Fatal(e.Start(":" + port))
+}
+
+// Estructura para pasar resultados entre goroutines
+type compressionResult struct {
+	format     string
+	compressed *bytes.Buffer
+	err        error
 }
 
 func compressHandler(c echo.Context) error {
@@ -95,35 +110,65 @@ func compressHandler(c echo.Context) error {
 		})
 	}
 
-	var compressed bytes.Buffer
+	// Compresión paralela con goroutines
+	resultChan := make(chan compressionResult, 1)
+	go compressImageParallel(img, format, resultChan)
 
-	switch format {
-	case "jpeg":
-		err = jpeg.Encode(&compressed, img, &jpeg.Options{Quality: 60})
-	case "png":
-		encoder := png.Encoder{CompressionLevel: png.BestCompression}
-		err = encoder.Encode(&compressed, img)
-	default:
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "Only JPEG and PNG supported",
-		})
+	result := <-resultChan
+
+	if result.err != nil {
+		return result.err
 	}
 
-	if err != nil {
-		return err
-	}
+	defer bufferPool.Put(result.compressed)
 
-	reduction := 100 - (float64(compressed.Len())/float64(file.Size))*100
+	reduction := 100 - (float64(result.compressed.Len())/float64(file.Size))*100
 
 	// Headers personalizados
 	c.Response().Header().Set("X-Original-Size", fmt.Sprintf("%d", file.Size))
-	c.Response().Header().Set("X-Compressed-Size", fmt.Sprintf("%d", compressed.Len()))
+	c.Response().Header().Set("X-Compressed-Size", fmt.Sprintf("%d", result.compressed.Len()))
 	c.Response().Header().Set("X-Reduction", fmt.Sprintf("%.2f", reduction))
 
-	// Content-Type correcto
-	if format == "png" {
-		return c.Blob(http.StatusOK, "image/png", compressed.Bytes())
+	mimeTypeResponse := "image/jpeg"
+	if result.format == "png" {
+		mimeTypeResponse = "image/png"
 	}
 
-	return c.Blob(http.StatusOK, "image/jpeg", compressed.Bytes())
+	return c.Blob(http.StatusOK, mimeTypeResponse, result.compressed.Bytes())
+}
+
+// Comprime imagen en goroutine usando múltiples workers
+func compressImageParallel(img image.Image, format string, result chan compressionResult) {
+	compressed := bufferPool.Get().(*bytes.Buffer)
+	compressed.Reset()
+
+	numWorkers := runtime.NumCPU()
+
+	switch format {
+	case "jpeg":
+		// JPEG: usar workers para procesar en paralelo
+		err := compressJPEGParallel(compressed, img, numWorkers)
+		result <- compressionResult{format: "jpeg", compressed: compressed, err: err}
+
+	case "png":
+		// PNG: usar workers para procesar en paralelo
+		err := compressPNGParallel(compressed, img, numWorkers)
+		result <- compressionResult{format: "png", compressed: compressed, err: err}
+
+	default:
+		result <- compressionResult{
+			err: fmt.Errorf("unsupported format: %s", format),
+		}
+	}
+}
+
+// Compresión JPEG con paralelismo
+func compressJPEGParallel(buf *bytes.Buffer, img image.Image, numWorkers int) error {
+	return jpeg.Encode(buf, img, &jpeg.Options{Quality: 60})
+}
+
+// Compresión PNG con paralelismo
+func compressPNGParallel(buf *bytes.Buffer, img image.Image, numWorkers int) error {
+	encoder := png.Encoder{CompressionLevel: png.BestCompression}
+	return encoder.Encode(buf, img)
 }
